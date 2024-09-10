@@ -1,6 +1,6 @@
 ---
 title: "Biométrie des oursins violets"
-author: "___"
+author: "Arthur Peeters"
 date: "`r Sys.Date()`"
 format:
   html:
@@ -49,4 +49,3 @@ urchin <- read("urchin_bio", package = "data.io")
 chart(data = ___, ___) +
   ___
 ```
-
