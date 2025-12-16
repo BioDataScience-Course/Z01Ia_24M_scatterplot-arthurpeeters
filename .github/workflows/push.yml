@@ -1,4 +1,5 @@
-name: Push summary + send to plumber
+
+name: Push summary (Job Summary only)
 
 on:
   push:
@@ -6,39 +7,122 @@ on:
       - main
 
 jobs:
-  summarize-and-send:
+  summarize:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Résumé du push (tous les commits)
+      # Checkout avec historique, indispensable pour diff BEFORE..AFTER.
+      # Par défaut, actions/checkout ne fetch qu'un commit ; fetch-depth: 0 fetch tout l'historique. [5](https://www.w3tutorials.net/blog/how-to-avoid-having-to-do-git-branch-set-upstream-and-instead-default-to-automatically-setup-remote-tracking/)[4](https://cran.r-project.org/web/packages/rstudioapi/vignettes/introduction.html)
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Génère le résumé complet dans le Job Summary via GITHUB_STEP_SUMMARY. [1](https://nhsdigital.github.io/rap-community-of-practice/training_resources/R/git_with_RStudio/)[2](https://github.com/rstudio/rstudioapi/issues/14)
+      - name: Résumé du push (commits + dates + stats)
         shell: bash
         run: |
-          echo "## Résumé du push" >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+
+          REPO="${{ github.repository }}"
+          REF="${{ github.ref }}"
+          ACTOR="${{ github.actor }}"
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.sha }}"
+          RUN_TS_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          # Pusher depuis le payload (souvent dispo), sinon fallback sur actor. [8](https://rdrr.io/cran/rstudioapi/src/R/commands.R)[7](https://docs.posit.co/ide/server-pro/admin/reference/rstudio_ide_commands.html)
+          PUSHER_NAME="$(jq -r '.pusher.name // .sender.login // empty' "$GITHUB_EVENT_PATH")"
+          [ -z "${PUSHER_NAME:-}" ] && PUSHER_NAME="$ACTOR"
+
+          # ------------------------------------------------------------
+          # 1) En-tête
+          # ------------------------------------------------------------
+          {
+            echo "## Résumé du push"
+            echo ""
+            echo "**Repo :** \`${REPO}\`"
+            echo ""
+            echo "**Branche :** \`${REF}\`"
+            echo ""
+            echo "**Actor (déclencheur) :** \`${ACTOR}\`"
+            echo ""
+            echo "**Pusher (payload) :** \`${PUSHER_NAME}\`"
+            echo ""
+            echo "**Date d'exécution (UTC) :** \`${RUN_TS_UTC}\`"
+            echo ""
+            echo "**Range :** \`${BEFORE} .. ${AFTER}\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # ------------------------------------------------------------
+          # 2) Table de tous les commits du push (SHA / auteur / date / message)
+          # Le payload push est lisible via $GITHUB_EVENT_PATH ; utile pour commits[]. [8](https://rdrr.io/cran/rstudioapi/src/R/commands.R)[6](https://rdrr.io/cran/rstudioapi/src/R/document-api.R)
+          # ------------------------------------------------------------
+          COUNT="$(jq '.commits | length' "$GITHUB_EVENT_PATH")"
+          echo "### Commits inclus dans ce push (${COUNT})" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          # Infos globales (repo, branche, etc.) via le contexte GitHub Actions
-          echo "**Repo :** \`${{ github.repository }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Branche :** \`${{ github.ref }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Actor :** \`${{ github.actor }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "**After (SHA) :** \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "| Commit | Contributeur (auteur) | Date du commit | Message |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          # Compter le nombre de commits présents dans l'événement
-          COUNT=$(jq '.commits | length' "$GITHUB_EVENT_PATH")
-          echo "**Nombre de commits dans ce push :** $COUNT" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          # Tableau Markdown
-          echo "| SHA | Auteur | Message |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
-
-          # Génère une ligne par commit
-          # - tronque le SHA
-          # - remplace retours à la ligne dans le message
-          # - échappe le caractère '|' qui casse les tableaux Markdown
           jq -r '
             .commits[]
-            | .message |= gsub("\r\n|\n|\r"; " ")
-            | .message |= gsub("\\|"; "\\\\|")
-            | "| [`\(.id[0:7])`](\(.url)) | \(.author.name) | \(.message) |"
+            | .short = (.id[0:7])
+            | .msg = (.message | gsub("\r\n|\n|\r"; " ") | gsub("\\|"; "\\\\|"))
+            | "| " + .short + " | " + (.author.name // "unknown") + " | " + (.timestamp // "unknown") + " | " + .msg + " |"
           ' "$GITHUB_EVENT_PATH" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # ------------------------------------------------------------
+          # 3) Stats globales ajoutées/supprimées (diff BEFORE -> AFTER)
+          # IMPORTANT: les champs added/removed/modified ont été retirés du payload push pour Actions,
+          # donc on calcule via git diff --numstat. [3](https://docs.posit.co/ide/user/ide/guide/productivity/add-ins.html)[4](https://cran.r-project.org/web/packages/rstudioapi/vignettes/introduction.html)
+          # BEFORE est dispo dans l'event push via github.event.before. [6](https://rdrr.io/cran/rstudioapi/src/R/document-api.R)[7](https://docs.posit.co/ide/server-pro/admin/reference/rstudio_ide_commands.html)
+          # ------------------------------------------------------------
+          echo "### Statistiques globales (diff BEFORE → AFTER)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$BEFORE" =~ ^0+$ ]]; then
+            echo "> ⚠️ Premier push sur une nouvelle branche : BEFORE=000… (diff global non calculable)." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          else
+            NUMSTAT="$(git diff --numstat "$BEFORE" "$AFTER")"
+
+            FILES_CHANGED="$(echo "$NUMSTAT" | wc -l | tr -d ' ')"
+            ADDED="$(echo "$NUMSTAT" | awk '{a+=$1} END {print a+0}')"
+            REMOVED="$(echo "$NUMSTAT" | awk '{d+=$2} END {print d+0}')"
+
+            # Estimation "modifiées" : Git ne donne pas un compteur natif "modified".
+            # Une modif est souvent 1 suppression + 1 ajout => min(added, removed). [4](https://cran.r-project.org/web/packages/rstudioapi/vignettes/introduction.html)
+            MODIFIED_EST=$(( ADDED < REMOVED ? ADDED : REMOVED ))
+
+            {
+              echo "| Indicateur | Valeur |"
+              echo "|---|---:|"
+              echo "| Fichiers changés | ${FILES_CHANGED} |"
+              echo "| Lignes ajoutées (+) | ${ADDED} |"
+              echo "| Lignes supprimées (-) | ${REMOVED} |"
+              echo "| Estimation lignes modifiées (~) | ${MODIFIED_EST} |"
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            # Détail par fichier en section repliable (pour éviter de surcharger).
+            echo "<details><summary>Détail par fichier (+/-)</summary>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Fichier | + | - |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---|---:|---:|" >> "$GITHUB_STEP_SUMMARY"
+            echo "$NUMSTAT" | awk 'BEGIN{FS="\t"} {printf "| `%s` | %s | %s |\n", $3, $1, $2}' >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # ------------------------------------------------------------
+          # ⚠️          # ⚠️ Limite de taille Job Summary : si énorme push (beaucoup de fichiers/commits),
+          # le summary peut dépasser ~1024k et échouer. [5](https://www.w3tutorials.net/blog/how-to-avoid-having-to-do-git-branch-set-upstream-and-instead-default-to-automatically-setup-remote-tracking/)[1](https://nhsdigital.github.io/rap-community-of-practice/training_resources/R/git_with_RStudio/)
