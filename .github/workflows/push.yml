@@ -1,0 +1,44 @@
+name: Push summary + send to plumber
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  summarize-and-send:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Résumé du push (tous les commits)
+        shell: bash
+        run: |
+          echo "## Résumé du push" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Infos globales (repo, branche, etc.) via le contexte GitHub Actions
+          echo "**Repo :** \`${{ github.repository }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Branche :** \`${{ github.ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Actor :** \`${{ github.actor }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**After (SHA) :** \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Compter le nombre de commits présents dans l'événement
+          COUNT=$(jq '.commits | length' "$GITHUB_EVENT_PATH")
+          echo "**Nombre de commits dans ce push :** $COUNT" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Tableau Markdown
+          echo "| SHA | Auteur | Message |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          # Génère une ligne par commit
+          # - tronque le SHA
+          # - remplace retours à la ligne dans le message
+          # - échappe le caractère '|' qui casse les tableaux Markdown
+          jq -r '
+            .commits[]
+            | .message |= gsub("\r\n|\n|\r"; " ")
+            | .message |= gsub("\\|"; "\\\\|")
+            | "| [`\(.id[0:7])`](\(.url)) | \(.author.name) | \(.message) |"
+          ' "$GITHUB_EVENT_PATH" >> "$GITHUB_STEP_SUMMARY"
